@@ -17,6 +17,9 @@
 #define ADC_TEMPERATURE_PIN 0xfe
 DECL_ENUMERATION("pin", "ADC_TEMPERATURE", ADC_TEMPERATURE_PIN);
 
+#define ADC_VREFINT_PIN 0xfd
+DECL_ENUMERATION("pin", "ADC_VREFINT", ADC_VREFINT_PIN);
+
 DECL_CONSTANT("ADC_MAX", 4095);
 
 #define ADCIN_BANK_SIZE 20
@@ -92,7 +95,7 @@ static const uint8_t adc_pins[] = {
     ADC_INVALID_PIN, //            Vbat/4
     ADC_TEMPERATURE_PIN,//         VSENSE
   #endif
-    ADC_INVALID_PIN, //           VREFINT
+    ADC_VREFINT_PIN, //           VREFINT
 #elif CONFIG_MACH_STM32G4
     ADC_INVALID_PIN,        // [0] vssa
     GPIO('A', 0),           // [1]
@@ -112,7 +115,7 @@ static const uint8_t adc_pins[] = {
     GPIO('B', 0),           // [15]
     ADC_TEMPERATURE_PIN,    // [16] vtemp
     ADC_INVALID_PIN,        // [17] vbat/3
-    ADC_INVALID_PIN,        // [18] vref
+    ADC_VREFINT_PIN,        // [18] vref
     ADC_INVALID_PIN,
     ADC_INVALID_PIN,        // [0] vssa       ADC 2
     GPIO('A', 0),           // [1]
@@ -134,7 +137,7 @@ static const uint8_t adc_pins[] = {
     GPIO('A', 4),           // [17]
     ADC_INVALID_PIN,        // [18] opamp
 #else // stm32l4
-    ADC_INVALID_PIN,        // vref
+    ADC_VREFINT_PIN,        // vref
     GPIO('C', 0),           // ADC12_IN1 .. 16
     GPIO('C', 1),
     GPIO('C', 2),
@@ -171,6 +174,7 @@ static const uint8_t adc_pins[] = {
   #define PCSEL PCSEL_RES0
 #elif CONFIG_MACH_STM32G4
   #define ADC_CCR_TSEN ADC_CCR_VSENSESEL
+  #define ADC_CCR_VREFEN 0  // VREFINT permanently connected on G4; no CCR bit needed
 #endif
 
 struct gpio_adc
@@ -264,6 +268,8 @@ gpio_adc_setup(uint32_t pin)
 
     if (pin == ADC_TEMPERATURE_PIN) {
         adc_common->CCR |= ADC_CCR_TSEN;
+    } else if (pin == ADC_VREFINT_PIN) {
+        adc_common->CCR |= ADC_CCR_VREFEN;
     } else {
         gpio_peripheral(pin, GPIO_ANALOG, 0);
     }

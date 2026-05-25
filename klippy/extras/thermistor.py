@@ -12,7 +12,7 @@ KELVIN_TO_CELSIUS = -273.15
 
 
 # Analog voltage to temperature converter for thermistors
-class Thermistor:
+class Thermistor(adc_temperature._VrefintCorrection):
     def __init__(self, pullup, inline_resistor):
         self.pullup = pullup
         self.inline_resistor = inline_resistor
@@ -56,7 +56,7 @@ class Thermistor:
 
     def calc_temp(self, adc):
         # Calculate temperature from adc
-        adc = max(0.00001, min(0.99999, adc))
+        adc = self._correct_adc(max(0.00001, min(0.99999, adc)))
         r = self.pullup * adc / (1.0 - adc)
         ln_r = math.log(r - self.inline_resistor)
         inv_t = self.c1 + self.c2 * ln_r + self.c3 * ln_r**3
@@ -75,7 +75,7 @@ class Thermistor:
         else:
             ln_r = (inv_t - self.c1) / self.c2
         r = math.exp(ln_r) + self.inline_resistor
-        return r / (self.pullup + r)
+        return self._uncorrect_adc(r / (self.pullup + r))
 
 
 # Create an ADC converter with a thermistor
@@ -97,6 +97,7 @@ def PrinterThermistor(config, params):
             params["r3"],
             name=config.get_name(),
         )
+    thermistor._setup_vrefint(config)
     return adc_temperature.PrinterADCtoTemperature(config, thermistor)
 
 

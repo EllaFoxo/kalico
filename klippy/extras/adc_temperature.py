@@ -8,16 +8,102 @@ import logging
 
 from .danger_options import get_danger_options
 
-# VREFINT factory calibration: (flash address, VDDA at cal time in V)
-# Calibration was performed at the listed VDDA; all values are 12-bit counts.
+# VREFINT factory calibration: (flash address, VDDA at cal time in V, ADC max count)
+# Formula: vrefint_voltage_nom = v_cal * VREFINT_CAL_flash / cal_max
+# STM32F0/G0/G4/L4/F2/F4: 12-bit calibration (cal_max=4095)
+# STM32H723: 12-bit calibration at 3.3 V (cal_max=4095)
+# STM32H7 (non-H723): 16-bit calibration at 3.3 V (cal_max=65535)
+# stm32h723 must appear before stm32h7 so the more-specific prefix matches first.
 _VREFINT_CAL = {
-    "stm32f0": (0x1FFFF7BA, 3.3),
-    "stm32g0": (0x1FFF75AA, 3.0),
-    "stm32g4": (0x1FFF75AA, 3.0),
-    "stm32l4": (0x1FFF75AA, 3.0),
-    "stm32f2": (0x1FFF7A2A, 3.3),
-    "stm32f4": (0x1FFF7A2A, 3.3),
+    "stm32f0":   (0x1FFFF7BA, 3.3, 4095),
+    "stm32g0":   (0x1FFF75AA, 3.0, 4095),
+    "stm32g4":   (0x1FFF75AA, 3.0, 4095),
+    "stm32l4":   (0x1FFF75AA, 3.0, 4095),
+    "stm32f2":   (0x1FFF7A2A, 3.3, 4095),
+    "stm32f4":   (0x1FFF7A2A, 3.3, 4095),
+    "stm32h723": (0x1FF1E856, 3.3, 4095),   # 12-bit cal
+    "stm32h7":   (0x1FF1E856, 3.3, 65535),  # 16-bit cal
 }
+
+######################################################################
+# VREFINT-based VDDA correction mixin
+######################################################################
+
+
+class _VrefintCorrection:
+    """Mixin that adds optional VREFINT-based VDDA correction to an ADC
+    temperature converter.
+
+    Subclasses must call _setup_vrefint(config) during construction.
+    If vrefint_pin is absent from config the correction is silently
+    disabled and the class behaves as if this mixin were not present.
+    """
+
+    # Class-level sentinel: keeps _correct_adc / _uncorrect_adc safe even
+    # when _setup_vrefint has never been called (e.g. Thermistor used in
+    # tests outside a running Klipper instance).
+    _mcu_vrefint = None
+
+    def _setup_vrefint(self, config):
+        self._nominal_vdda = config.getfloat("nominal_vdda", 3.3, above=0.0)
+        self._vdda_actual = self._nominal_vdda
+        self._vrefint_voltage_nom = None
+        vrefint_pin = config.get("vrefint_pin", None)
+        if vrefint_pin:
+            ppins = config.get_printer().lookup_object("pins")
+            self._mcu_vrefint = ppins.setup_pin("adc", vrefint_pin)
+            self._mcu_vrefint.setup_adc_callback(
+                REPORT_TIME, self._vrefint_callback
+            )
+            self._mcu_vrefint.setup_minmax(
+                SAMPLE_TIME,
+                SAMPLE_COUNT,
+                minval=0.1,
+                maxval=0.9,
+                range_check_count=0,
+            )
+            self._mcu_vrefint.get_mcu().register_config_callback(
+                self._build_vrefint_config
+            )
+        else:
+            self._mcu_vrefint = None
+
+    def _build_vrefint_config(self):
+        mcu = self._mcu_vrefint.get_mcu()
+        mcu_type = mcu.get_constants().get("MCU", "").lower()
+        debug_read = mcu.lookup_query_command(
+            "debug_read order=%c addr=%u", "debug_result val=%u"
+        )
+        for prefix, (addr, v_cal, cal_max) in _VREFINT_CAL.items():
+            if mcu_type.startswith(prefix):
+                cal = debug_read.send([1, addr])["val"]
+                self._vrefint_voltage_nom = v_cal * cal / cal_max
+                return
+        logging.warning(
+            "VREFINT calibration not available for MCU '%s';"
+            " VDDA correction disabled",
+            mcu_type,
+        )
+
+    def _vrefint_callback(self, read_time, read_value):
+        if self._vrefint_voltage_nom is not None and read_value > 0.001:
+            self._vdda_actual = self._vrefint_voltage_nom / read_value
+
+    def _correct_adc(self, adc):
+        """Scale raw ADC fraction to remove VDDA influence (for calc_temp)."""
+        if self._mcu_vrefint is not None:
+            return max(
+                0.00001,
+                min(0.99999, adc * self._nominal_vdda / self._vdda_actual),
+            )
+        return adc
+
+    def _uncorrect_adc(self, adc):
+        """Re-introduce VDDA influence into an ideal fraction (for calc_adc)."""
+        if self._mcu_vrefint is not None:
+            return adc * self._vdda_actual / self._nominal_vdda
+        return adc
+
 
 ######################################################################
 # Interface between MCU adc and heater temperature callbacks
@@ -170,7 +256,7 @@ class CustomLinearVoltage:
 
 
 # Linear resistance calibrated from temperature measurements
-class LinearResistance:
+class LinearResistance(_VrefintCorrection):
     def __init__(self, config, samples):
         self.pullup = config.getfloat("pullup_resistor", 4700.0, above=0.0)
         self.inline_resistor = config.getfloat(
@@ -182,67 +268,18 @@ class LinearResistance:
             raise config.error(
                 "adc_temperature %s in heater %s" % (str(e), config.get_name())
             )
-        # Optional VREFINT-based VDDA correction
-        self._nominal_vdda = config.getfloat("nominal_vdda", 3.3, above=0.0)
-        self._vdda_actual = self._nominal_vdda
-        self._vrefint_voltage_nom = None
-        vrefint_pin = config.get("vrefint_pin", None)
-        if vrefint_pin:
-            ppins = config.get_printer().lookup_object("pins")
-            self._mcu_vrefint = ppins.setup_pin("adc", vrefint_pin)
-            self._mcu_vrefint.setup_adc_callback(
-                REPORT_TIME, self._vrefint_callback
-            )
-            self._mcu_vrefint.setup_minmax(
-                SAMPLE_TIME,
-                SAMPLE_COUNT,
-                minval=0.1,
-                maxval=0.9,
-                range_check_count=0,
-            )
-            self._mcu_vrefint.get_mcu().register_config_callback(
-                self._build_vrefint_config
-            )
-        else:
-            self._mcu_vrefint = None
-
-    def _build_vrefint_config(self):
-        mcu = self._mcu_vrefint.get_mcu()
-        mcu_type = mcu.get_constants().get("MCU", "").lower()
-        debug_read = mcu.lookup_query_command(
-            "debug_read order=%c addr=%u", "debug_result val=%u"
-        )
-        for prefix, (addr, v_cal) in _VREFINT_CAL.items():
-            if mcu_type.startswith(prefix):
-                cal = debug_read.send([1, addr])["val"]
-                self._vrefint_voltage_nom = v_cal * cal / 4095.0
-                return
-        logging.warning(
-            "LinearResistance: VREFINT calibration not available for MCU '%s'",
-            mcu_type,
-        )
-
-    def _vrefint_callback(self, read_time, read_value):
-        if self._vrefint_voltage_nom is not None and read_value > 0.001:
-            self._vdda_actual = self._vrefint_voltage_nom / read_value
+        self._setup_vrefint(config)
 
     def calc_temp(self, adc):
         # Calculate temperature from adc
-        adc = max(0.00001, min(0.99999, adc))
-        if self._mcu_vrefint is not None:
-            adc = max(
-                0.00001,
-                min(0.99999, adc * self._nominal_vdda / self._vdda_actual),
-            )
+        adc = self._correct_adc(max(0.00001, min(0.99999, adc)))
         r = self.pullup * adc / (1.0 - adc) - self.inline_resistor
         return self.li.interpolate(r)
 
     def calc_adc(self, temp):
         # Calculate adc reading from a temperature
         r = self.li.reverse_interpolate(temp) + self.inline_resistor
-        if self._mcu_vrefint is not None:
-            return r / (self.pullup + r) * self._vdda_actual / self._nominal_vdda
-        return r / (self.pullup + r)
+        return self._uncorrect_adc(r / (self.pullup + r))
 
 
 # Custom defined sensors from the config file
