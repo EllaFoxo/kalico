@@ -18,6 +18,9 @@ DECL_CONSTANT("ADC_MAX", 4095);
 #define ADC_TEMPERATURE_PIN 0xfe
 DECL_ENUMERATION("pin", "ADC_TEMPERATURE", ADC_TEMPERATURE_PIN);
 
+#define ADC_VREFINT_PIN 0xfd
+DECL_ENUMERATION("pin", "ADC_VREFINT", ADC_VREFINT_PIN);
+
 static const uint8_t adc_pins[] = {
     GPIO('A', 0), GPIO('A', 1), GPIO('A', 2), GPIO('A', 3),
     GPIO('A', 4), GPIO('A', 5), GPIO('A', 6), GPIO('A', 7),
@@ -25,10 +28,10 @@ static const uint8_t adc_pins[] = {
 #if CONFIG_MACH_STM32F0
     GPIO('C', 0), GPIO('C', 1),
     GPIO('C', 2), GPIO('C', 3), GPIO('C', 4), GPIO('C', 5),
-    ADC_TEMPERATURE_PIN
+    ADC_TEMPERATURE_PIN, ADC_VREFINT_PIN
 #elif CONFIG_MACH_STM32G0
     GPIO('B', 2), GPIO('B', 10),
-    ADC_TEMPERATURE_PIN, 0x00, 0x00,
+    ADC_TEMPERATURE_PIN, ADC_VREFINT_PIN, 0x00,
     GPIO('B', 11), GPIO('B', 12), GPIO('C', 4), GPIO('C', 5),
 #endif
 };
@@ -98,7 +101,9 @@ gpio_adc_setup(uint32_t pin)
     }
 
     if (pin == ADC_TEMPERATURE_PIN)
-        ADC1_COMMON->CCR = ADC_CCR_TSEN;
+        ADC1_COMMON->CCR |= ADC_CCR_TSEN;
+    else if (pin == ADC_VREFINT_PIN)
+        ADC1_COMMON->CCR |= ADC_CCR_VREFEN;
     else
         gpio_peripheral(pin, GPIO_ANALOG, 0);
 
